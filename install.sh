@@ -73,13 +73,5 @@ else
     exit 1
 fi
 
-# Step 8: Clean up the installer
-cd "$CURRENT_DIR" || exit
-echo "Cleaning up the installer..."
-if rm -f "$0"; then
-    echo "Installation complete. Installer removed."
-    echo "The cPanel Inode Usage Plugin has been successfully installed!"
-else
-    echo "Failed to clean up the installer."
-    exit 1
-fi
+# Final message
+echo "The cPanel Inode Usage Plugin has been successfully installed!"
