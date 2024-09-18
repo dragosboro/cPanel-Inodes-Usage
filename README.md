@@ -13,6 +13,7 @@ This plugin, created by [ChemiCloud.com](https://chemicloud.com) for their clien
 ## Installation Instructions
 
 For WGET (recommended for most cPanel servers): bash <(wget -qO- https://raw.githubusercontent.com/dragosboro/cPanel-Inodes-Usage/main/install.sh)
+
 For CURL: bash <(curl -s https://raw.githubusercontent.com/dragosboro/cPanel-Inodes-Usage/main/install.sh)
 
 For further installation instructions, explanations and assistance, check out the **[cPanel Inode Usage Plugin](https://chemicloud.com/blog/cpanel-inode-usage)**.
