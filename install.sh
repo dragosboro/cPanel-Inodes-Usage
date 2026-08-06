@@ -54,7 +54,7 @@ readonly RELEASE_ASSET="cPanel-Inodes-Usage-${SCRIPT_VERSION}.tar.gz"
 readonly RELEASE_URL="https://github.com/${REPO_SLUG}/releases/download/${RELEASE_TAG}/${RELEASE_ASSET}"
 # RELEASE ENGINEERING: substituted at tag time; gate tagging on it. Until then this is not 64 hex
 # digits, so standalone mode refuses to run rather than fetch unverified code as root.
-readonly RELEASE_SHA256='REPLACE_WITH_RELEASE_ASSET_SHA256'
+readonly RELEASE_SHA256='766ac4ba0bf998535b242f4d320a28a53dbae13719e96fca0098affaa0e229e3'
 readonly PLUGIN_ID='inode_usage'    # cPanel names BOTH dynamicui_<id>.conf and <id>.<ext> from this
 readonly APP_SUBDIR='inode_usage'
 readonly ICON_FILE='inode_usage.svg'
