@@ -1,0 +1,679 @@
+[%#
+    Inode Usage — cPanel plugin, v2 (Template Toolkit page + custom UAPI module)
+
+    Deployed to:  <theme_root>/inode_usage/index.html.tt
+    Registered as: uri "inode_usage/index.html.tt" in plugin/install.json
+
+    IMPORTANT: this file must live exactly one directory below the theme root.
+    _assets/master.html.tt renders every chrome asset URL against
+    CPANEL.CPVAR.dprefix, which we set to "../" below — the same value
+    _assets/empty.html.tt hard-codes. Adding a subdirectory would break the
+    favicon, the apple-touch-icon and css/base_overrides.min.css.
+
+    There is deliberately no .live.php / .live.pl anywhere in this plugin:
+    cpanel.pl::setup_external_engine() creates a unix socket inside the user's
+    home BEFORE handler dispatch, which fails with EDQUOT for over-quota
+    accounts — the exact users this tool exists to help. A .html.tt page and a
+    custom UAPI module both render correctly under and over quota.
+%]
+[%
+    SET CPANEL.CPVAR.dprefix = "../";
+%]
+[% WRAPPER '_assets/master.html.tt'
+    app_key    = 'inode_usage'
+    page_title = 'Inode Usage'
+-%]
+<div class="body-content">
+<p>The Inode Usage tool provides an overview of inode consumption in your account. It displays total inodes used, breaks down usage by directory, and <strong>allows you to expand directories for detailed inode counts</strong>. Additionally, on this page you can see your cPanel account inode limit and directly access File Manager for quick navigation, helping you manage your quota effectively.</p>
+<div class="alert alert-info">
+    <span class="glyphicon glyphicon-info-sign"></span>
+    <div class="alert-message">
+        This table is <strong>updated in real-time</strong> with every page reload. Please note that if you have <i>more than 500,000 inodes</i>, the counting process <strong>can take up to 1 minute</strong>.
+    </div>
+</div>
+<!-- Preloader Section -->
+<div id="preloader" role="status" aria-live="polite" style="text-align: center; padding: 20px;">
+    <br><br><br>
+    <img src="preloader.gif" alt="Loading..." style="width: 50px; height: 50px;" />
+    <p style="padding-top: 50px;">Please wait, it can take up to 1 minute to count all the inodes.</p>
+</div>
+
+<div id="inode_table_container" style="display: none;">
+    <!-- Inode data table will be populated here -->
+</div>
+
+<script>
+(function () {
+    "use strict";
+
+    /* ---------------------------------------------------------------------
+     * API contract, as implemented by lib/Cpanel/API/ChemiCloudInodeUsage.pm.
+     * These three constants are the only place the module and function names
+     * appear.
+     *
+     *   GET <token>/execute/ChemiCloudInodeUsage/get_usage
+     *     -> data: {
+     *          directories:    [ row, ... ]  immediate children of the home,
+     *                                        sorted by inodes DESCENDING,
+     *          total_inodes:   <int>         quota inodes_used when available,
+     *          inode_limit:    <int> | "Unlimited",
+     *          homedir:        <abs str>     the account home,
+     *          counted_inodes: <int>         what the walk actually counted,
+     *          quota_available:<bool>        false = total_inodes is the walked
+     *                                        subtotal, NOT the sidebar figure,
+     *          truncated:      <bool>        the walk hit a budget/ceiling/depth
+     *                                        limit, so the numbers undercount,
+     *          omitted_directories: <int>    counted but not listed (row cap),
+     *          busy:           <bool>        another scan holds the lock,
+     *          tree:           { <relpath>: [ row, ... ], ... }   OPTIONAL,
+     *                                        full depth, "" keys the home
+     *        }
+     *
+     *   GET <token>/execute/ChemiCloudInodeUsage/list_subfolders?path=<relpath>
+     *     -> data: { directories: [ row, ... ], path, inodes, truncated,
+     *                omitted_directories, busy }
+     *     Only called when "tree" is absent. "path" is HOME-RELATIVE with no
+     *     leading slash; "" is the home itself. The module re-derives the home
+     *     from $Cpanel::homedir and returns an identical successful empty
+     *     result for outside-home / nonexistent / unreadable, so there is no
+     *     existence oracle in the body, the status or the shape.
+     *
+     *   row = { name, relpath, path (absolute), inodes (int),
+     *           has_subfolders (real JSON true/false) }
+     * ------------------------------------------------------------------- */
+    var API_MODULE       = "ChemiCloudInodeUsage";
+    var API_FN_TOP       = "get_usage";
+    var API_FN_SUBFOLDER = "list_subfolders";
+
+    /* Server-rendered, never client-controlled. HTTP_HOST is deliberately not
+     * used: cpsrvd accepts an arbitrary Host header, so reflecting it produced
+     * an open redirect that leaked the live cpsess token. Every URL below is
+     * root-relative, which also drops the hard-coded :2083 that broke proxied
+     * access. This is the pattern cPanel itself ships in raw/index.html.tt and
+     * cron/index.html.tt. */
+    var SECURITY_TOKEN = [% CPANEL.ENV.cp_security_token.json() || '""' %];
+    var THEME          = [% CPANEL.CPDATA.RS.json() || '"jupiter"' %];
+    var HOME_DIR       = [% CPANEL.homedir.json() || '""' %];
+
+    /* The displayed Total is the quota figure (identical to the cPanel sidebar),
+     * which counts inodes owned by this uid anywhere — including outside the
+     * home directory. The rows below it only cover directories inside the home,
+     * so the column legitimately sums to less than the Total. When the API also
+     * reports counted_inodes we label both numbers instead of leaving the gap
+     * unexplained. Set to false to render the Total cell exactly as v1 did. */
+    var SHOW_HOME_SUBTOTAL = true;
+
+    var preloader     = document.getElementById("preloader");
+    var dataContainer = document.getElementById("inode_table_container");
+
+    /* Parent row -> child rows, so collapsing never depends on parsing a class
+     * name back into a path. */
+    var childRows = new WeakMap();
+
+    /* Row -> its home-relative path, so nothing the client sends back to the
+     * API is ever reconstructed from an absolute string. */
+    var rowRelPath = new WeakMap();
+
+    /* Home-relative parent path -> sorted child rows. Populated from the
+     * initial response when the module ships the full-depth map, in which case
+     * every expand is an instant client-side lookup and list_subfolders is
+     * never called. Stays null otherwise. */
+    var treeIndex = null;
+
+    /* ----------------------------------------------------------------- URLs */
+
+    function apiUrl(func, params) {
+        var qs = [];
+        if (params) {
+            Object.keys(params).forEach(function (k) {
+                qs.push(encodeURIComponent(k) + "=" + encodeURIComponent(params[k]));
+            });
+        }
+        qs.push("cache_fix=" + Date.now());
+        return SECURITY_TOKEN + "/execute/" + encodeURIComponent(API_MODULE) +
+               "/" + encodeURIComponent(func) + "?" + qs.join("&");
+    }
+
+    function apiGet(func, params) {
+        return fetch(apiUrl(func, params), {
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: { "Accept": "application/json" }
+        }).then(function (response) {
+            if (!response.ok) {
+                throw new Error("Network response was not ok");
+            }
+            return response.json();
+        }).then(function (envelope) {
+            if (!envelope || typeof envelope !== "object") {
+                throw new Error("Malformed response");
+            }
+
+            /* UAPI envelope: { status, data, errors, messages, warnings, metadata } */
+            if (Number(envelope.status) !== 1) {
+                var errs = envelope.errors;
+                var err = new Error(
+                    (errs && errs.length) ? String(errs.join(" ")) : "The request failed."
+                );
+                err.busy = !!(envelope.data && envelope.data.busy === true);
+                throw err;
+            }
+            return envelope.data;
+        });
+    }
+
+    /* Absolute path -> home-relative, used only as a fallback if a row ever
+     * arrives without relpath. */
+    function deriveRelPath(absPath) {
+        if (!HOME_DIR || typeof absPath !== "string") {
+            return "";
+        }
+        if (absPath === HOME_DIR) {
+            return "";
+        }
+        if (absPath.indexOf(HOME_DIR + "/") === 0) {
+            return absPath.slice(HOME_DIR.length + 1);
+        }
+        return "";
+    }
+
+    /* File Manager wants the path relative to the home WITH a leading slash,
+     * which is exactly what v1's path.replace(homeDir, "") produced. */
+    function fileManagerUrl(relPath) {
+        return SECURITY_TOKEN + "/frontend/" + encodeURIComponent(THEME) +
+               "/filemanager/index.html?dirselect=homedir&dir=" +
+               encodeURIComponent("/" + relPath);
+    }
+
+    /* Kept byte-identical to v1 so the emitted class attribute is unchanged.
+     * It is decorative only — collapsing is driven by childRows above. */
+    function encodePathForClass(path) {
+        return String(path).replace(/[^a-zA-Z0-9]/g, function (c) {
+            return "_" + c.charCodeAt(0).toString(16);
+        });
+    }
+
+    /* ------------------------------------------------------------ tree map */
+
+    function normalizeRow(row) {
+        var absPath = row && typeof row.path === "string" ? row.path : "";
+        var rel = row && typeof row.relpath === "string" ? row.relpath : deriveRelPath(absPath);
+        return {
+            path: absPath,
+            relpath: rel,
+            inodes: row && typeof row.inodes === "number" ? row.inodes : 0,
+            has_subfolders: !!(row && row.has_subfolders === true)
+        };
+    }
+
+    function sortDescending(list) {
+        list.sort(function (a, b) {
+            return b.inodes - a.inodes;
+        });
+        return list;
+    }
+
+    function normalizeList(list) {
+        return sortDescending((Array.isArray(list) ? list : []).map(normalizeRow));
+    }
+
+    /* The module ships { "<relpath>": [ row, ... ] } with "" keying the home.
+     * A flat { "<path>": { inodes, has_subfolders } } map is also accepted so
+     * the page keeps working if the module's map shape is ever simplified.
+     * Returns null when unusable, which falls back to per-directory calls. */
+    function buildTreeIndex(tree) {
+        if (!tree || typeof tree !== "object" || Array.isArray(tree)) {
+            return null;
+        }
+
+        var keys = Object.keys(tree);
+        if (!keys.length) {
+            return null;
+        }
+
+        var index = Object.create(null);
+
+        if (Array.isArray(tree[keys[0]])) {
+            keys.forEach(function (parent) {
+                if (Array.isArray(tree[parent])) {
+                    index[parent] = normalizeList(tree[parent]);
+                }
+            });
+        } else {
+            keys.forEach(function (key) {
+                var cut = String(key).lastIndexOf("/");
+                var parent;
+                if (cut < 0) {
+                    parent = "";               /* relative key, one level down */
+                } else if (cut === 0) {
+                    parent = "/";              /* absolute key at the fs root  */
+                } else {
+                    parent = String(key).slice(0, cut);
+                }
+                if (!index[parent]) {
+                    index[parent] = [];
+                }
+
+                /* The displayed path is always absolute, as in v1, whichever
+                 * form the map is keyed in. */
+                var isAbsolute = String(key).charAt(0) === "/";
+                var absPath = isAbsolute ? String(key)
+                            : (HOME_DIR ? HOME_DIR + "/" + key : String(key));
+
+                index[parent].push(normalizeRow({
+                    path: absPath,
+                    relpath: isAbsolute ? deriveRelPath(absPath) : String(key),
+                    inodes: tree[key] && tree[key].inodes,
+                    has_subfolders: tree[key] && tree[key].has_subfolders
+                }));
+            });
+            Object.keys(index).forEach(function (parent) {
+                sortDescending(index[parent]);
+            });
+        }
+
+        return Object.keys(index).length ? index : null;
+    }
+
+    function getChildren(relPath, absPath) {
+        /* "" is the home itself. No listed row is ever the home, so an empty
+         * relative path means the row's path could not be placed inside the
+         * home — never re-list the home in its place. */
+        if (typeof relPath !== "string" || relPath === "") {
+            return Promise.resolve([]);
+        }
+        if (treeIndex) {
+            /* relpath is the module's own key; the absolute lookup is only
+             * insurance against a map keyed the other way. */
+            var hit = treeIndex[relPath] || treeIndex[absPath];
+            return Promise.resolve(hit ? hit.slice() : []);
+        }
+        return apiGet(API_FN_SUBFOLDER, { path: relPath }).then(function (data) {
+            /* An expand can hit the time budget or the row cap just as the
+             * initial call can. Dropping that flag rendered a short child list
+             * as if it were the whole story. */
+            notePartial(data);
+            return normalizeList(
+                Array.isArray(data) ? data : (data && data.directories)
+            );
+        });
+    }
+
+    /* --------------------------------------------------------------- render */
+
+    function clear(node) {
+        while (node.firstChild) {
+            node.removeChild(node.firstChild);
+        }
+    }
+
+    function makeToggleIcon(row) {
+        var icon = document.createElement("i");
+        icon.className = "fa fa-chevron-right toggle-icon";
+        icon.style.cursor = "pointer";
+        icon.style.marginRight = "5px";
+        icon.setAttribute("role", "button");
+        icon.setAttribute("tabindex", "0");
+        icon.setAttribute("aria-expanded", "false");
+        icon.setAttribute("aria-label", "Expand " + row.path);
+        return icon;
+    }
+
+    /* Every path reaches the DOM through textContent or a property assignment.
+     * Never innerHTML — a directory can legitimately be named
+     *   x<img src=x onerror=alert(1)>&"test
+     * and v1 interpolated exactly that into innerHTML twice per row. */
+    function buildRow(entry, depth, parentEncodedPath) {
+        var row = document.createElement("tr");
+        row.className = "folder-row";
+        if (parentEncodedPath) {
+            row.classList.add("subfolder-of-" + parentEncodedPath);
+        }
+        row.dataset.path = entry.path;
+        row.dataset.depth = String(depth);
+        rowRelPath.set(row, entry.relpath);
+
+        var nameCell = document.createElement("td");
+        nameCell.style.paddingLeft = (20 + (depth * 20)) + "px";
+
+        if (entry.has_subfolders === true) {
+            nameCell.appendChild(makeToggleIcon(entry));
+        }
+
+        var link = document.createElement("a");
+        link.className = "folder-link";
+        link.dataset.path = entry.path;
+        link.style.color = "#428bca";
+        link.href = fileManagerUrl(entry.relpath);
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = entry.path;
+        nameCell.appendChild(link);
+
+        var countCell = document.createElement("td");
+        countCell.textContent = entry.inodes;
+
+        row.appendChild(nameCell);
+        row.appendChild(countCell);
+
+        var icon = row.querySelector(".toggle-icon");
+        if (icon) {
+            icon.addEventListener("click", function (event) {
+                event.stopPropagation();
+                toggleSubfolders(row);
+            });
+            icon.addEventListener("keydown", function (event) {
+                if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleSubfolders(row);
+                }
+            });
+        }
+
+        return row;
+    }
+
+    function setExpanded(row, expanded) {
+        var icon = row.querySelector(".toggle-icon");
+        if (expanded) {
+            row.classList.add("expanded");
+        } else {
+            row.classList.remove("expanded");
+        }
+        if (icon) {
+            /* remove-then-add, in v1's order, so the emitted class attribute is
+             * byte-identical. Avoids classList.toggle(cls, force), whose second
+             * argument is the one part of the API with ragged support. */
+            icon.classList.remove(expanded ? "fa-chevron-right" : "fa-chevron-down");
+            icon.classList.add(expanded ? "fa-chevron-down" : "fa-chevron-right");
+            icon.setAttribute("aria-expanded", expanded ? "true" : "false");
+            icon.setAttribute(
+                "aria-label",
+                (expanded ? "Collapse " : "Expand ") + String(row.dataset.path)
+            );
+        }
+    }
+
+    function removeDescendants(row) {
+        var kids = childRows.get(row);
+        if (!kids) {
+            return;
+        }
+        kids.forEach(function (kid) {
+            removeDescendants(kid);
+            if (kid.parentNode) {
+                kid.parentNode.removeChild(kid);
+            }
+        });
+        childRows.delete(row);
+    }
+
+    /* v1 called insertBefore(subRow, row.nextSibling) inside the forEach, which
+     * reversed the descending sort: the top level rendered descending and every
+     * expanded level rendered ascending. Advancing the anchor keeps the server's
+     * descending order at every depth. */
+    function insertChildren(row, children, depth) {
+        var encoded = encodePathForClass(row.dataset.path);
+        var fragment = document.createDocumentFragment();
+        var inserted = [];
+
+        /* Built detached and inserted once: expanding a directory with tens of
+         * thousands of immediate subdirectories otherwise forces one reflow per
+         * child. The fragment is filled in order, so the server's descending
+         * sort survives exactly as it did with an advancing anchor. */
+        children.forEach(function (child) {
+            var childRow = buildRow(child, depth + 1, encoded);
+            fragment.appendChild(childRow);
+            inserted.push(childRow);
+        });
+
+        row.parentNode.insertBefore(fragment, row.nextSibling);
+        childRows.set(row, inserted);
+    }
+
+    /* Row -> the sequence number of the expand currently considered live. Any
+     * resolved fetch carrying a stale number is discarded. A plain "loading"
+     * flag was not enough: it did not survive the collapse branch, so a second
+     * click during a slow expand left the row collapsed but still inserted its
+     * children, and a third click inserted a second, permanently uncollapsible
+     * copy. */
+    var expandSeq = new WeakMap();
+
+    function toggleSubfolders(row) {
+        var depth = parseInt(row.dataset.depth, 10) || 0;
+
+        if (row.classList.contains("expanded")) {
+            setExpanded(row, false);
+            removeDescendants(row);
+            expandSeq.set(row, (expandSeq.get(row) || 0) + 1);   /* invalidate any in-flight load */
+            return;
+        }
+
+        var seq = (expandSeq.get(row) || 0) + 1;
+        expandSeq.set(row, seq);
+        setExpanded(row, true);
+
+        getChildren(rowRelPath.get(row), row.dataset.path).then(function (children) {
+            /* Stale, or detached because an ancestor was collapsed while this
+             * was in flight -- row.parentNode is null in the second case and
+             * insertBefore would throw a raw TypeError into the alert() below. */
+            if (expandSeq.get(row) !== seq || !row.parentNode) {
+                return;
+            }
+
+            /* Nothing came back: the directory became unreadable or vanished
+             * since the walk, or containment rejected it. Either way this is a
+             * failed expand, so put the chevron back instead of leaving it
+             * pointing down over no rows (v1 left it stuck). */
+            if (!children.length) {
+                setExpanded(row, false);
+                return;
+            }
+            insertChildren(row, children, depth);
+        }).catch(function (error) {
+            if (expandSeq.get(row) !== seq || !row.parentNode) {
+                return;
+            }
+            setExpanded(row, false);
+            console.error("Error fetching subfolders:", error);
+            window.alert("Error fetching subfolders: " + error.message);
+        });
+    }
+
+    function omittedCount(data) {
+        return (data && typeof data.omitted_directories === "number") ? data.omitted_directories : 0;
+    }
+
+    function isPartial(data) {
+        return !!(data && (data.truncated === true || omittedCount(data) > 0));
+    }
+
+    function buildPartialNotice(data) {
+        var box = document.createElement("div");
+        box.className = "alert alert-warning inode-partial-notice";
+
+        var glyph = document.createElement("span");
+        glyph.className = "glyphicon glyphicon-exclamation-sign";
+        glyph.setAttribute("aria-hidden", "true");
+        box.appendChild(glyph);
+
+        var message = document.createElement("div");
+        message.className = "alert-message";
+
+        var strong = document.createElement("strong");
+        strong.textContent = "Partial results:";
+        message.appendChild(strong);
+
+        /* "a safety limit" rather than "the time limit": truncated also covers
+         * the entry ceiling and the depth cap, and naming the wrong one is
+         * worse than naming none. */
+        if (data && data.truncated === true) {
+            message.appendChild(document.createTextNode(
+                " counting stopped at a safety limit, so some directories may be missing or undercounted."
+            ));
+        }
+        if (omittedCount(data) > 0) {
+            message.appendChild(document.createTextNode(
+                " Only the largest subdirectories are listed; " + omittedCount(data) +
+                " smaller ones are included in the totals but not shown."
+            ));
+        }
+
+        box.appendChild(message);
+        return box;
+    }
+
+    /* Shown once per page, above the table, whichever call reported it. */
+    function notePartial(data) {
+        if (!isPartial(data) || !dataContainer || dataContainer.querySelector(".inode-partial-notice")) {
+            return;
+        }
+        dataContainer.insertBefore(buildPartialNotice(data), dataContainer.firstChild);
+    }
+
+    function buildTotalRow(data) {
+        var row = document.createElement("tr");
+
+        var labelCell = document.createElement("td");
+        var labelStrong = document.createElement("strong");
+        labelStrong.textContent = "Total";
+        labelCell.appendChild(labelStrong);
+
+        var valueCell = document.createElement("td");
+        var valueStrong = document.createElement("strong");
+
+        /* Strict compare, exactly as v1: the API sends the integer limit, or the
+         * literal string "Unlimited" when the limit is 0. */
+        var inodeLimitDisplay = data.inode_limit === "Unlimited" ? "Unlimited" : data.inode_limit;
+        valueStrong.textContent = data.total_inodes + " / " + inodeLimitDisplay;
+        valueCell.appendChild(valueStrong);
+
+        var counted = typeof data.counted_inodes === "number" ? data.counted_inodes
+                    : (typeof data.home_inodes === "number" ? data.home_inodes : null);
+        var noteText = null;
+
+        if (SHOW_HOME_SUBTOTAL) {
+            if (data.quota_available === false) {
+                /* The module could not read the quota, so total_inodes is the
+                 * walked home subtotal and NOT the number in the sidebar. It
+                 * would otherwise be labelled "Total" with nothing to say so.
+                 * Realistic trigger: an account that has never logged in, whose
+                 * ~/.cpanel/datastore does not exist yet. */
+                noteText = "counted in your home directory — your account quota was unavailable";
+            } else if (counted !== null && counted !== data.total_inodes) {
+                noteText = counted + " in home directory · " +
+                           data.total_inodes + " counted by your quota";
+            }
+        }
+
+        if (noteText !== null) {
+            valueCell.appendChild(document.createElement("br"));
+            var note = document.createElement("small");
+            note.className = "text-muted";
+            note.textContent = noteText;
+            valueCell.appendChild(note);
+        }
+
+        row.appendChild(labelCell);
+        row.appendChild(valueCell);
+        return row;
+    }
+
+    function buildTable(data) {
+        var table = document.createElement("table");
+        table.className = "table table-hover table-bordered";
+        table.style.width = "100%";
+        table.style.borderCollapse = "collapse";
+        table.style.marginTop = "20px";
+
+        var thead = document.createElement("thead");
+        var headRow = document.createElement("tr");
+        ["Directory", "Inodes"].forEach(function (label) {
+            var th = document.createElement("th");
+            th.setAttribute("scope", "col");
+            th.textContent = label;
+            headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+
+        var tbody = document.createElement("tbody");
+        normalizeList(data.directories).forEach(function (dir) {
+            tbody.appendChild(buildRow(dir, 0, null));
+        });
+        tbody.appendChild(buildTotalRow(data));
+        table.appendChild(tbody);
+
+        return table;
+    }
+
+    function renderInodeData(data) {
+        /* The module's own notion of the home wins over the template's; they
+         * are both server-side, and using the module's keeps display paths and
+         * File Manager links consistent with what it will accept back. */
+        if (data && typeof data.homedir === "string" && data.homedir) {
+            HOME_DIR = data.homedir;
+        }
+
+        preloader.style.display = "none";
+        dataContainer.style.display = "block";
+        clear(dataContainer);
+
+        if (data && Array.isArray(data.directories) && data.directories.length > 0) {
+            treeIndex = buildTreeIndex(data.tree);
+            dataContainer.appendChild(buildTable(data));
+        } else {
+            var empty = document.createElement("p");
+            empty.textContent = "No data available.";
+            dataContainer.appendChild(empty);
+        }
+
+        notePartial(data);   /* inserts above the table */
+    }
+
+    /* A walk abandoned by a reload keeps running -- and keeps the per-account
+     * lock -- until it finishes, so the reload can arrive while the previous
+     * request is still counting. Waiting is strictly better than telling the
+     * user to reload into the same message. Bounded, because two piled-up
+     * requests must not hold a cpsrvd child indefinitely. */
+    var BUSY_RETRIES  = 2;
+    var BUSY_RETRY_MS = 3000;
+
+    function fetchInodeData(attempt) {
+        attempt = attempt || 0;
+
+        apiGet(API_FN_TOP).then(renderInodeData).catch(function (error) {
+            if (error.busy && attempt < BUSY_RETRIES) {
+                window.setTimeout(function () { fetchInodeData(attempt + 1); }, BUSY_RETRY_MS);
+                return;   /* preloader stays up; nothing else changes */
+            }
+
+            console.error("Error fetching inode data:", error);
+            clear(preloader);
+
+            /* "Another scan is already running" is a state v1 could not reach,
+             * so there is no frozen wording to preserve and the server's
+             * message is far more actionable. Everything else keeps v1's. */
+            preloader.textContent = error.busy
+                ? error.message
+                : "Failed to load data. Please try reloading the page.";
+        });
+    }
+
+    /* #preloader and #inode_table_container are parsed above this script, so
+     * there is nothing to wait for. The guard only matters if this block is
+     * ever moved. */
+    if (preloader && dataContainer) {
+        fetchInodeData();
+    } else {
+        document.addEventListener("DOMContentLoaded", function () {
+            preloader = document.getElementById("preloader");
+            dataContainer = document.getElementById("inode_table_container");
+            fetchInodeData();
+        });
+    }
+})();
+</script>
+</div><!-- end body-content -->
+[% END #wrapper %]

@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Release build output
+# ---------------------------------------------------------------------------
+# Tarballs and zips are release *artifacts*, not sources. They are attached to
+# the GitHub release, never committed. (The old data.zip / inode_usage.tar.gz
+# workflow is exactly what this repo moved away from: the payload now lives in
+# src/, lib/ and plugin/ in version control.)
+*.tar.gz
+*.tgz
+*.zip
+SHA256SUMS
+SHA256SUMS.asc
+*.sig
+
+# ---------------------------------------------------------------------------
+# macOS AppleDouble / resource-fork junk
+# ---------------------------------------------------------------------------
+# The vendor tarball that shipped for roughly two years was built on a Mac with
+# plain `tar`, so it carried ._install.json, ._meta.json and ._inode_usage.svg
+# alongside the real files, plus com.apple.quarantine extended attributes.
+# Those AppleDouble stubs got extracted onto the server and sat in the plugin
+# directory forever. Never track them, and never build a release with them:
+#
+#   COPYFILE_DISABLE=1 tar --exclude='._*' --exclude='.DS_Store' \
+#       -czf cPanel-Inodes-Usage-<version>.tar.gz <files>
+#
+# (On macOS use COPYFILE_DISABLE=1; GNU tar on Linux never creates these.)
+.DS_Store
+.DS_Store?
+._*
+.AppleDouble
+.AppleDesktop
+.LSOverride
+.Spotlight-V100
+.Trashes
+.fseventsd
+.VolumeIcon.icns
+.DocumentRevisions-V100
+.TemporaryItems
+.apdisk
+Icon?
+
+# ---------------------------------------------------------------------------
+# Editor and OS scratch files
+# ---------------------------------------------------------------------------
+*.swp
+*.swo
+*.swn
+*~
+*.bak
+*.orig
+*.rej
+.idea/
+.vscode/
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Local scratch space
+# ---------------------------------------------------------------------------
+/tmp/
+/build/
+/dist/
+*.log

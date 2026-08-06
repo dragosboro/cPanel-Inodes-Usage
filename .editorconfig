@@ -1,0 +1,49 @@
+; EditorConfig — https://editorconfig.org
+; Keeps the page, the UAPI module, the installer, and the plugin metadata
+; consistent regardless of which editor touches them.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{pm,pl,t}]
+indent_style = space
+indent_size = 4
+
+[*.{tt,html}]
+indent_style = space
+indent_size = 4
+
+; 4, not 2: install.sh and uninstall.sh have always been written with 4-space
+; indents, and the old value of 2 disagreed with every line of both files.
+[*.{sh,bash}]
+indent_style = space
+indent_size = 4
+
+[*.{json,yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+indent_style = space
+indent_size = 2
+# Markdown uses two trailing spaces as a hard line break.
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab
+
+# Binary and third-party files: leave exactly as shipped.
+[*.{gif,png,svg,tar.gz,zip}]
+insert_final_newline = false
+trim_trailing_whitespace = false
+
+[LICENSE]
+insert_final_newline = false
+trim_trailing_whitespace = false
