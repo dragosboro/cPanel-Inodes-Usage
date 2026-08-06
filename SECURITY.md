@@ -9,8 +9,9 @@ privileged system tool.
 
 | Version | Supported          | Notes                                                        |
 | ------- | ------------------ | ------------------------------------------------------------ |
-| 2.1.0   | Yes                | Current release. Security fixes land here.                    |
-| 2.0.0   | No                 | Upgrade to 2.1.0. Fixes are not backported. Note that 2.0.0's standalone (`bash <(curl …)`) install path is broken — it always fails at extraction — so any 2.0.0 install came from a checkout. |
+| 2.2.0   | Yes                | Current release. Security fixes land here.                    |
+| 2.1.0   | No                 | Upgrade to 2.2.0. Fixes are not backported. |
+| 2.0.0   | No                 | Upgrade to 2.2.0. Fixes are not backported. Note that 2.0.0's standalone (`bash <(curl …)`) install path is broken — it always fails at extraction — so any 2.0.0 install came from a checkout. |
 | < 2.0.0 | No                 | There is no public 1.x. Anything older is a pre-release copy of the PHP implementation, installed from the original vendor tarball, which fetched its payload from an external personal domain that no longer serves it. Those installs are broken as well as unsupported, and one of their endpoints does not confine its path parameter to the caller's home directory — upgrade to 2.0.0 (the installer removes those endpoints) rather than reporting issues against them. |
 
 There is no long-term support branch. Fixes are released as a new patch version

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [2.2.0] - 2026-08-06
+
+### Added
+
+- **The page shows the installed plugin version next to its title**, through
+  Jupiter's own `page_sub_heading` slot, so anyone can compare an install
+  against the newest GitHub release and see at a glance that it is outdated.
+  The value is read server-side from the `VERSION` marker the installer writes
+  into the application directory — the same marker the installer uses to
+  recognise an existing install — so the page reports what is actually
+  deployed, not what the page file believes it is. The value is reduced to
+  version-string characters before rendering (the chrome renders the
+  sub-heading unescaped), and a missing marker (a hand-copied install) simply
+  renders no version. The page still makes no outbound requests: the
+  comparison against GitHub is the reader's, not the page's.
+
 ## [2.1.0] - 2026-08-06
 
 ### Added
@@ -317,6 +333,7 @@ that has been running on production servers.
 - The dependency on a PHP interpreter being available to cPanel's internal web
   server. Nothing in the plugin is PHP any more.
 
-[Unreleased]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/dragosboro/cPanel-Inodes-Usage/releases/tag/v2.0.0

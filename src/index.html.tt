@@ -18,6 +18,27 @@
 %]
 [%
     SET CPANEL.CPVAR.dprefix = "../";
+
+    # The installed release, read from the VERSION marker the installer writes
+    # beside this page — the same marker it uses to recognise an existing
+    # install — so the page reports what is actually deployed. Rendered next to
+    # the page title through Jupiter's own page_sub_heading slot, so anyone can
+    # compare an install against the newest GitHub release at a glance.
+    # INSERT, not PROCESS: the file is plain text, never a template. The
+    # replace() keeps version-string characters only, which strips the trailing
+    # newline and anything a corrupted or hand-edited marker might carry — the
+    # chrome renders page_sub_heading unescaped. A missing marker (hand-copied
+    # install) renders no version at all.
+    SET installed_version = '';
+    TRY;
+        installed_version = INSERT 'inode_usage/VERSION';
+        installed_version = installed_version.replace('[^0-9A-Za-z._-]', '');
+    CATCH;
+        SET installed_version = '';
+    END;
+    IF installed_version;
+        SET page_sub_heading = 'v' _ installed_version;
+    END;
 %]
 [% WRAPPER '_assets/master.html.tt'
     app_key    = 'inode_usage'

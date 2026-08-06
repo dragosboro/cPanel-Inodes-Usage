@@ -70,6 +70,14 @@ symlinks sitting directly in the home directory, plus anything the ownership fil
 test account the 15 top-level rows summed to 3,025 against a quota figure of 3,085. The Total label
 therefore shows both numbers rather than pretending the difference does not exist.
 
+## What's new in 2.2.0
+
+- **The installed version shows next to the page title.** The page reads the `VERSION` marker the
+  installer writes beside it and renders it as small text in the page heading, so anyone can
+  compare an install against the newest release here and see at a glance that it is outdated. The
+  value reflects what is actually deployed — a hand-copied install without the marker simply shows
+  no version — and the page still makes no outbound requests.
+
 ## What's new in 2.1.0
 
 - **Standalone installs work again.** The 2.0.0 installer passed a nonexistent `--no-absolute-names`
@@ -152,7 +160,7 @@ servers, installed from the pre-release vendor tarball.
 ### Recommended: clone the tag, read it, run it
 
 ```bash
-git clone --branch v2.1.0 --depth 1 https://github.com/dragosboro/cPanel-Inodes-Usage
+git clone --branch v2.2.0 --depth 1 https://github.com/dragosboro/cPanel-Inodes-Usage
 sudo ./cPanel-Inodes-Usage/install.sh
 ```
 
@@ -168,7 +176,7 @@ sudo ./cPanel-Inodes-Usage/install.sh --dry-run
 ### Convenience: tag-pinned one-liner
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/dragosboro/cPanel-Inodes-Usage/v2.1.0/install.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/dragosboro/cPanel-Inodes-Usage/v2.2.0/install.sh)
 ```
 
 Understand the trade-off: **you are executing remote code as root, and GitHub's TLS certificate is
@@ -176,7 +184,7 @@ the only thing standing between you and whatever that URL returns.** You have no
 are running. Run it only if that is acceptable on the box in question.
 
 Use `curl -fsSL`, not `curl -s`: without `-f`, curl prints the server's HTML error body on a 404 and
-exits 0, so `bash` is handed a web page instead of a script. And the URL is pinned to the `v2.1.0`
+exits 0, so `bash` is handed a web page instead of a script. And the URL is pinned to the `v2.2.0`
 tag, not to `main`, because a `main`-pinned one-liner re-fetches whatever was pushed most recently.
 
 Run this way the installer has no local payload, so it downloads the release tarball from that tag's
@@ -225,7 +233,8 @@ ls -l /usr/local/cpanel/Cpanel/API/ChemiCloudInodeUsage.pm
 The installer runs its own post-install verification — owner and mode on every deployed path, a
 `perl -c` syntax check and a load check on the UAPI module, and confirmation that the menu entry
 points at the file that was actually deployed — and exits non-zero if anything fails. A clean exit
-plus a `VERSION` reading `2.1.0` means the plugin is fully in place. Then log in as any cPanel user
+plus a `VERSION` reading `2.2.0` means the plugin is fully in place. The page itself displays the
+same version next to its title, read from that marker. Then log in as any cPanel user
 and look for **Inode Usage** in the Files group.
 
 cPanel rebuilds its UAPI catalogue asynchronously after a plugin is installed. A minute or two later

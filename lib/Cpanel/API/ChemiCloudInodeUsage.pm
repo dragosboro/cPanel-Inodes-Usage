@@ -14,7 +14,7 @@ package Cpanel::API::ChemiCloudInodeUsage;
 use strict;
 use warnings;
 
-our $VERSION = '2.1.0';
+our $VERSION = '2.2.0';
 
 use Cwd         ();
 use Fcntl       ();
