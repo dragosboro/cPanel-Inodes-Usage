@@ -576,9 +576,22 @@
      * a truncated walk undercounts counted_inodes, which would inflate this
      * row with ordinary in-home inodes the walk never reached. The quota
      * figure is TTL-cached by cPanel and can trail the kernel briefly, so a
-     * small negative difference is possible and suppressed. */
+     * small negative difference is possible and suppressed.
+     *
+     * An unreadable directory inside the home is the same kind of undercount
+     * without setting truncated: the walk counts the directory itself and skips
+     * whatever is inside it. That is the ordinary nobody-owned LiteSpeed cache
+     * case, common enough that flagging the whole result as partial for it would
+     * put a permanent notice on most accounts — but the difference it leaves has
+     * nothing to do with files outside the home, so this row would name it
+     * wrongly. Suppress the row and let the "counted" figure under the Total
+     * carry the discrepancy instead. */
     function outsideHomeCount(data) {
         if (!data || data.quota_available !== true || data.truncated === true) {
+            return null;
+        }
+        if (data.stats && typeof data.stats.unreadable_directories === "number"
+            && data.stats.unreadable_directories > 0) {
             return null;
         }
         if (typeof data.total_inodes !== "number" || typeof data.counted_inodes !== "number") {

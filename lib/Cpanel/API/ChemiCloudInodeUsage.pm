@@ -14,7 +14,7 @@ package Cpanel::API::ChemiCloudInodeUsage;
 use strict;
 use warnings;
 
-our $VERSION = '2.2.0';
+our $VERSION = '2.3.1';
 
 use Cwd         ();
 use Fcntl       ();
@@ -63,6 +63,14 @@ baseline defence, and the process-wide self-throttling below cannot leak into
 another request or another account. Path containment is still mandatory: without
 it these endpoints are a filesystem enumeration oracle for anything the account
 can read.
+
+B<Permissions are not the whole boundary.> C<cpsrvd> enters neither LVE nor
+CageFS, so on a CloudLinux server this process sits outside the jail that
+confines the same account's shell, cron and PHP. A jailed account sees a
+virtualised F</etc> and a F</home> containing only itself; this process sees the
+real ones. Containment here must therefore be enforced by the module, not
+assumed from the account's own uid: escaping the home would disclose material a
+jailed account cannot otherwise reach. See L</CONTAINMENT>.
 
 One exception to "one process, one call": C<Cpanel::API::Batch> runs every
 command of a batch B<in the same process, sequentially, with no cap on the
@@ -125,6 +133,34 @@ the ceiling, and would serialise a ~45 MB response and then ask the browser to
 build 200,000 rows from it.
 
 =back
+
+=head1 CONTAINMENT
+
+The walk must never leave the account's home directory. What makes that true is
+not a prefix check on a string -- it is that B<every syscall is rooted at a
+descriptor we have already validated>, and that no name the client supplied is
+ever re-resolved from F</> after validation.
+
+C<_resolve_request_path> opens the home directory by name once. That one name is
+safe to trust because the account cannot rename its own home: it does not own
+F</home>. Each further component of a requested path is then reached through the
+descriptor of the component above it, via C<"/proc/self/fd/N/$component">, and
+must C<lstat> as a directory and open to the inode that C<lstat> reported.
+C<_walk_tree> descends the same way: each frame carries the anchor of its own
+open handle, and children are addressed as C<"$anchor/$name">. See the
+"Descriptor anchoring" comment above C<_anchor>.
+
+Rooting resolution at a held descriptor rather than at a pathname is what makes
+the containment hold under concurrent modification: an intermediate component
+cannot be swapped out from under the lookup, because the lookup does not re-walk
+it. The C<stat($child_dh)>-versus-C<lstat> comparison is kept on top of that and
+covers the one component that is still addressed by name, the leaf. Relying on a
+path prefix or a device check instead does not hold on a shared server, where
+the relevant directories commonly share one filesystem.
+
+If C</proc> is unavailable the endpoints refuse to answer rather than fall back
+to a pathname-based descent. A degraded mode would be indistinguishable, in the
+response and on the page, from a contained one.
 
 =head1 GUARDRAILS
 
@@ -229,6 +265,70 @@ sub _now {
     return defined $CLOCK_MONOTONIC ? Time::HiRes::clock_gettime($CLOCK_MONOTONIC) : Time::HiRes::time();
 }
 
+#----------------------------------------------------------------------
+# Descriptor anchoring -- the containment mechanism
+#----------------------------------------------------------------------
+
+# Every path this module hands to a syscall is rooted at an ALREADY-OPEN,
+# ALREADY-VALIDATED directory descriptor. F</proc/self/fd/N> is a magic link the
+# kernel resolves from the open file's dentry rather than by re-parsing text, so
+# renaming or replacing any ancestor of that directory cannot redirect the
+# lookup. Only the final component of C<"$anchor/$name"> is a name, and lstat
+# does not follow it; the leaf is covered separately by the stat($child_dh)
+# inode check at the descent. A path prefix or device check would not hold here:
+# on a normal server /, /home and /etc share one filesystem.
+#
+# Perl has no fdopendir, and this perl has neither Fcntl::AT_FDCWD nor a
+# syscall.ph to reach openat() by number, so the magic link is the mechanism.
+
+sub _anchor {
+    my ($dh) = @_;
+
+    my $fd = fileno($dh);
+    return if !defined $fd || $fd < 0;
+
+    return '/proc/self/fd/' . $fd;
+}
+
+# Probed once per process, because the answer cannot change under us.
+#
+# If anchoring is unavailable we refuse to walk rather than fall back to the
+# pathname-based descent this replaced. That fallback is precisely the
+# vulnerability, and nothing in the response or on the page could tell a
+# degraded answer from a contained one -- an operator would never learn that
+# containment had quietly stopped applying. /proc is mounted on every machine
+# cpsrvd can run on (cpsrvd itself needs it), and hidepid hides other processes,
+# never 'self', so this is a guard against the impossible rather than a
+# supported mode.
+my $ANCHORING_OK;
+
+sub _anchoring_ok {
+    return $ANCHORING_OK if defined $ANCHORING_OK;
+
+    $ANCHORING_OK = eval {
+        opendir( my $probe, '/' ) or die;
+
+        my $ok     = 0;
+        my $anchor = _anchor($probe);
+
+        if ( defined $anchor ) {
+
+            # stat, not lstat: the bare anchor IS a symlink, and we are asking
+            # where it lands. Inside the walk the anchor is only ever an
+            # intermediate component, which the kernel always follows.
+            my @by_link = stat($anchor);
+            my @by_fd   = stat($probe);
+
+            $ok = ( @by_link && @by_fd && $by_link[0] == $by_fd[0] && $by_link[1] == $by_fd[1] ) ? 1 : 0;
+        }
+
+        closedir($probe);
+        $ok;
+    } || 0;
+
+    return $ANCHORING_OK;
+}
+
 # Cpanel::API::Batch runs a whole batch in one process; see EXECUTION CONTEXT.
 # Package scope, not lexical, so a test harness can reset it: in production one
 # uapi process serves exactly one call, so nothing ever needs to.
@@ -236,9 +336,9 @@ our $WALKS_STARTED = 0;
 
 # Walk-frame slots.
 use constant {
-    _F_NAME  => 0,    # basename of this directory
-    _F_PATH  => 1,    # absolute path used for syscalls
-    _F_REL   => 2,    # path relative to the account home ('' for the home itself)
+    _F_NAME   => 0,    # basename of this directory
+    _F_ANCHOR => 1,    # '/proc/self/fd/N' for this directory's own open handle
+    _F_REL    => 2,    # path relative to the account home ('' for the home itself)
     _F_DH    => 3,    # open directory handle
     _F_OWNED => 4,    # 1 if this directory itself is owned by the account
     _F_ACC   => 5,    # running count of owned entries beneath this directory
@@ -296,7 +396,7 @@ sub get_usage {
         return 0;
     }
 
-    my ( $dh, $root_path, $root_rel, $root_dev ) = _resolve_request_path( '', $home_display, $home_real );
+    my ( $dh, $root_rel, $root_dev ) = _resolve_request_path( '', $home_display, $home_real );
 
     if ( !$dh ) {
         close($lock_fh) if $lock_fh;
@@ -313,7 +413,6 @@ sub get_usage {
         _walk_tree(
             {
                 root_dh       => $dh,
-                root_path     => $root_path,
                 root_rel      => $root_rel,
                 root_dev      => $root_dev,
                 uid           => $uid,
@@ -402,7 +501,7 @@ sub list_subfolders {
 
     my ($raw) = $args->get('path');
 
-    my ( $dh, $root_path, $root_rel, $root_dev ) = _resolve_request_path( $raw, $home_display, $home_real );
+    my ( $dh, $root_rel, $root_dev ) = _resolve_request_path( $raw, $home_display, $home_real );
 
     if ( !$dh ) {
         close($lock_fh) if $lock_fh;
@@ -420,7 +519,6 @@ sub list_subfolders {
         _walk_tree(
             {
                 root_dh       => $dh,
-                root_path     => $root_path,
                 root_rel      => $root_rel,
                 root_dev      => $root_dev,
                 uid           => $uid,
@@ -507,11 +605,19 @@ sub _identity {
 # Validate a client-supplied home-relative path and hand back an already-open
 # directory handle for it.
 #
-# Returns ( $dirhandle, $abs_path, $relative_path, $dev ) on success and an empty
-# list for every rejection reason, so the caller cannot accidentally branch on
-# why it failed.
+# Returns ( $dirhandle, $relative_path, $dev ) on success and an empty list for
+# every rejection reason, so the caller cannot accidentally branch on why it
+# failed.
+#
+# The home directory is opened by name exactly once. That one name is safe to
+# trust because the account cannot rename its own home: it does not own the
+# directory that contains it. Every component below the home is then reached
+# through the descriptor of the component above it, so no part of the path the
+# client supplied is ever re-resolved from / after we have validated it.
 sub _resolve_request_path {
     my ( $raw, $home_display, $home_real ) = @_;
+
+    return if !_anchoring_ok();
 
     $raw = '' if !defined $raw;
     return if index( $raw, "\0" ) >= 0;
@@ -533,55 +639,72 @@ sub _resolve_request_path {
     $raw =~ s{/+\z}{};
     $raw = '' if $raw eq '.';
 
-    my $rel = '';
+    my @parts;
     if ( length $raw ) {
-        my @parts = split m{/}, $raw, -1;
+        @parts = split m{/}, $raw, -1;
         for my $part (@parts) {
             return if !length $part;                    # '//' or a trailing empty component
             return if $part eq '.' || $part eq '..';    # traversal
         }
-        $rel = join '/', @parts;
     }
 
-    my $target = length($rel) ? "$home_real/$rel" : $home_real;
+    my $rel = join '/', @parts;
 
-    # abs_path resolves every component. Requiring it to come back unchanged
-    # means no component anywhere in the path is a symlink, which is a much
-    # stronger invariant than a prefix check and is exactly what our own
-    # listings produce (we never descend into symlinks, so we never emit one).
-    my $canonical = Cwd::abs_path($target);
-    return if !defined $canonical;
-    return if $canonical ne $target;
+    #--- the base -------------------------------------------------------------
+    my @hst = lstat($home_real);
+    return if !@hst;
+    return if ( $hst[2] & _S_IFMT ) != _S_IFDIR;    # symlink or non-directory
 
-    # Belt: the prefix check the resolution above already implies.
-    return if $canonical ne $home_real && rindex( $canonical, "$home_real/", 0 ) != 0;
+    opendir( my $dh, $home_real ) or return;
 
-    # Braces: cPanel's own re-rooting must agree with ours. Skipped for the
-    # pathological case of a newline in a directory name, which homedirfixup
-    # strips and we do not.
-    if ( index( $rel, "\n" ) < 0 ) {
-        require Cpanel::SafeDir::Fixup;
-        my $fixed = Cpanel::SafeDir::Fixup::homedirfixup( $rel, $home_real, $home_real );
-        return if !defined $fixed || $fixed ne $target;
-    }
-
-    my @lst = lstat($target);
-    return if !@lst;
-    return if ( $lst[2] & _S_IFMT ) != _S_IFDIR;    # symlink or non-directory
-
-    opendir( my $dh, $target ) or return;
-
-    # Close the easy TOCTOU: whatever we actually opened must be the same inode
-    # we just validated. (A swap of an *intermediate* component inside the
-    # account's own home remains theoretically racy; it is same-uid and grants
-    # no access the account does not already have from a shell.)
     my @dst = stat($dh);
-    if ( !@dst || $dst[0] != $lst[0] || $dst[1] != $lst[1] ) {
+    if ( !@dst || $dst[0] != $hst[0] || $dst[1] != $hst[1] ) {
         closedir($dh);
         return;
     }
 
-    return ( $dh, $target, $rel, $lst[0] );
+    my $dev = $dst[0];
+
+    #--- one component at a time, each anchored to the one above --------------
+    for my $part (@parts) {
+        my $anchor = _anchor($dh);
+        if ( !defined $anchor ) {
+            closedir($dh);
+            return;
+        }
+
+        # lstat, so a component that is a symlink fails the directory test
+        # below instead of being followed. This is what the old abs_path()
+        # round-trip bought, except that it now holds at the moment of use
+        # rather than at the moment of checking.
+        my @cst = lstat("$anchor/$part");
+        if ( !@cst || ( $cst[2] & _S_IFMT ) != _S_IFDIR ) {
+            closedir($dh);
+            return;
+        }
+
+        my $cdh;
+        if ( !opendir( $cdh, "$anchor/$part" ) ) {
+            closedir($dh);
+            return;
+        }
+
+        # The remaining race is the leaf: this one name could have been swapped
+        # between the lstat and the opendir. The anchor cannot move under us, so
+        # comparing what we opened against what we validated settles it.
+        my @cdst = stat($cdh);
+        if ( !@cdst || $cdst[0] != $cst[0] || $cdst[1] != $cst[1] ) {
+            closedir($cdh);
+            closedir($dh);
+            return;
+        }
+
+        closedir($dh);
+        $dh  = $cdh;
+        $dev = $cdst[0];
+    }
+
+    return ( $dh, $rel, $dev );
 }
 
 #----------------------------------------------------------------------
@@ -617,7 +740,13 @@ sub _walk_tree {
     my @root_st    = stat( $opt->{'root_dh'} );
     my $root_owned = ( @root_st && $root_st[4] == $uid ) ? 1 : 0;
 
-    my @stack = ( [ '', $opt->{'root_path'}, $opt->{'root_rel'}, $opt->{'root_dh'}, $root_owned, 0, [], 0 ] );
+    # The root anchor. _resolve_request_path has already proved this descriptor
+    # is the directory it claims to be; from here on nothing re-resolves a name
+    # from / and the caller's path string is never used for a syscall again.
+    my $root_anchor = _anchor( $opt->{'root_dh'} );
+    return if !defined $root_anchor;
+
+    my @stack = ( [ '', $root_anchor, $opt->{'root_rel'}, $opt->{'root_dh'}, $root_owned, 0, [], 0 ] );
 
     my %seen_hardlink;
     my %tree;
@@ -735,7 +864,10 @@ sub _walk_tree {
             $last_check = $now;
         }
 
-        my $full = $frame->[_F_PATH] . '/' . $name;
+        # Anchored at this directory's own descriptor, so $name is the only part
+        # of this that is a name. Nothing above it can be renamed out from under
+        # the lookup; see "Descriptor anchoring".
+        my $full = $frame->[_F_ANCHOR] . '/' . $name;
 
         my @st = lstat($full);
         next if !@st;    # vanished between readdir and lstat
@@ -761,23 +893,30 @@ sub _walk_tree {
                 $decline = 'unreadable';
             }
             else {
-                # TOCTOU. $full is a path string, re-resolved from / by the
-                # kernel at opendir time with no O_NOFOLLOW, so "we lstat'd a
-                # directory" does NOT prove "we opened that directory": an entry
-                # renamed to a symlink between the two syscalls sends the walk
-                # wherever the symlink points. On this server /, /etc, /home and
-                # the cPanel root are all one device, so the device test above is
-                # no backstop whatsoever -- one win of that race would list every
-                # account under /home. This is the same check
-                # _resolve_request_path already makes on the request path, and it
-                # closes the race completely at the leaf: either the entry was a
-                # symlink at lstat time (branch not taken) or the handle we now
-                # hold is a different inode from the one we validated.
+                # The leaf, and now the only component still addressed by name.
+                # $name is re-resolved inside the anchored directory at opendir
+                # time with no O_NOFOLLOW, so "we lstat'd a directory" does not by
+                # itself prove "we opened that directory". Comparing the handle we
+                # hold against the inode we validated settles it: either the entry
+                # was already a symlink at lstat time (branch not taken) or the
+                # handle is a different inode and we decline. Because the anchor
+                # cannot move, this comparison cannot be satisfied by resolving
+                # both syscalls to the same object outside the tree.
                 my @dst = stat($child_dh);
                 if ( !@dst || $dst[0] != $st[0] || $dst[1] != $st[1] || $dst[0] != $root_dev ) {
                     closedir($child_dh);
                     undef $child_dh;
                     $decline = 'swapped';
+                }
+            }
+
+            my $child_anchor;
+            if ( !$decline ) {
+                $child_anchor = _anchor($child_dh);
+                if ( !defined $child_anchor ) {
+                    closedir($child_dh);
+                    undef $child_dh;
+                    $decline = 'unreadable';
                 }
             }
 
@@ -788,7 +927,7 @@ sub _walk_tree {
                 next;
             }
 
-            push @stack, [ $name, $full, $child_rel, $child_dh, $owned, 0, [], $frame->[_F_DEPTH] + 1 ];
+            push @stack, [ $name, $child_anchor, $child_rel, $child_dh, $owned, 0, [], $frame->[_F_DEPTH] + 1 ];
             next;
         }
 

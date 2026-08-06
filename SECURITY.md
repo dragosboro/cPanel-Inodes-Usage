@@ -9,10 +9,10 @@ privileged system tool.
 
 | Version | Supported          | Notes                                                        |
 | ------- | ------------------ | ------------------------------------------------------------ |
-| 2.2.0   | Yes                | Current release. Security fixes land here.                    |
-| 2.1.0   | No                 | Upgrade to 2.2.0. Fixes are not backported. |
-| 2.0.0   | No                 | Upgrade to 2.2.0. Fixes are not backported. Note that 2.0.0's standalone (`bash <(curl …)`) install path is broken — it always fails at extraction — so any 2.0.0 install came from a checkout. |
-| < 2.0.0 | No                 | There is no public 1.x. Anything older is a pre-release copy of the PHP implementation, installed from the original vendor tarball, which fetched its payload from an external personal domain that no longer serves it. Those installs are broken as well as unsupported, and one of their endpoints does not confine its path parameter to the caller's home directory — upgrade to 2.0.0 (the installer removes those endpoints) rather than reporting issues against them. |
+| 2.3.1   | Yes                | Current release. Security fixes land here. Upgrade recommended. |
+| 2.1.0–2.2.0 | No             | Upgrade to 2.3.1. Fixes are not backported. |
+| 2.0.0   | No                 | Upgrade to 2.3.1. Note that 2.0.0's standalone (`bash <(curl …)`) install path is broken — it always fails at extraction — so any 2.0.0 install came from a checkout. |
+| < 2.0.0 | No                 | There is no public 1.x. Anything older is a pre-release copy of the PHP implementation, installed from the original vendor tarball, which fetched its payload from an external personal domain that no longer serves it. Those installs are broken as well as unsupported — upgrade to the current release, whose installer removes those endpoints, rather than reporting issues against them. |
 
 There is no long-term support branch. Fixes are released as a new patch version
 of the newest minor release; older minors are not backported.
@@ -24,7 +24,10 @@ installer writes:
 cat /usr/local/cpanel/base/frontend/jupiter/inode_usage/VERSION
 ```
 
-An installation with no `VERSION` file predates 2.0.0 and is a pre-release copy.
+An installation with no `VERSION` file predates 2.0.0 and is a pre-release copy;
+its `.live.php` endpoints are unsupported and should be removed by upgrading to
+the current release (the installer removes them) or by deleting
+`/usr/local/cpanel/base/frontend/<theme>/inode_usage/` outright.
 
 ## Reporting a vulnerability
 
@@ -116,11 +119,10 @@ user:
 - Anything that lets one account read, infer, or affect another account's data.
 - Privilege escalation beyond the calling user's own Unix privileges.
 - Path traversal or containment failures. `list_subfolders` takes a
-  **home-relative** path, derives the base server-side, resolves the join, and
-  requires the result to be the home directory or inside it; the walk verifies
-  that every directory handle it opened is the inode it validated. Any input, or
-  any race, that gets either of them to report on a path outside the account's
-  home directory is in scope and wanted.
+  **home-relative** path, derives the base server-side, and confines the result
+  to the account's home directory or below. Any input, or any race, that gets
+  either endpoint to report on a path outside the account's home directory is in
+  scope and wanted.
 - Any difference — in body, status, or timing — between the responses for
   outside-home, nonexistent and unreadable paths, since that difference would be
   an existence oracle.
@@ -174,4 +176,7 @@ or a checksum embedded in `install.sh` that does not match the published asset.
 - The plugin is registered only through cPanel's own
   `/usr/local/cpanel/scripts/install_plugin` and the `dynamicui/` drop-in
   directory. It never edits the `cpanelsync`-managed `<theme>/dynamicui.conf`,
-  and it never writes into `/home`.
+  and the installer never writes into `/home`.
+- At *runtime* the only write is cPanel's own quota-cache refresh in
+  `~/.cpanel/datastore` (via `Cpanel::Quota::displayquota()`, the same call the
+  cPanel sidebar makes); the endpoints never write customer files.

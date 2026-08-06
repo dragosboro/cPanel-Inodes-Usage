@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [2.3.1] - 2026-08-06
+
+Security and performance fix. Upgrade is recommended for all installations;
+there is no configuration-level workaround for earlier releases.
+
+- Hardening of the directory-scanning endpoints. Details are withheld until
+  installations have had a chance to upgrade.
+- Corrected a display case where the "Outside your home directory" row could
+  appear for a home containing a directory the scan could not read.
+- Documentation corrections.
+
 ## [2.2.0] - 2026-08-06
 
 ### Added
@@ -333,7 +344,8 @@ that has been running on production servers.
 - The dependency on a PHP interpreter being available to cPanel's internal web
   server. Nothing in the plugin is PHP any more.
 
-[Unreleased]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.3.1...HEAD
+[2.3.1]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.2.0...v2.3.1
 [2.2.0]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/dragosboro/cPanel-Inodes-Usage/releases/tag/v2.0.0

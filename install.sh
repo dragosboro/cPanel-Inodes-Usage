@@ -44,7 +44,7 @@
 
 set -Eeuo pipefail   # -E propagates the ERR trap into functions, which makes exit 12 reachable.
 
-readonly SCRIPT_VERSION='2.2.0'
+readonly SCRIPT_VERSION='2.3.1'
 readonly REPO_SLUG='dragosboro/cPanel-Inodes-Usage'
 readonly RELEASE_TAG="v${SCRIPT_VERSION}"
 # An UPLOADED asset, not GitHub's auto-generated /archive/ tarball: that one is recompressed server-
@@ -55,7 +55,7 @@ readonly RELEASE_ASSET="cPanel-Inodes-Usage-${SCRIPT_VERSION}.tar.gz"
 readonly RELEASE_URL="https://github.com/${REPO_SLUG}/releases/download/${RELEASE_TAG}/${RELEASE_ASSET}"
 # RELEASE ENGINEERING: substituted at tag time; gate tagging on it. Until then this is not 64 hex
 # digits, so standalone mode refuses to run rather than fetch unverified code as root.
-readonly RELEASE_SHA256='68bb15fdfbcef564fda0343ea0aa99ff79110662d2b88967b3d056f2cc598cc6'
+readonly RELEASE_SHA256='b93e00f696391113a60499df630ea5922af83dd4c25b3b202734c127312425e0'
 readonly PLUGIN_ID='inode_usage'    # cPanel names BOTH dynamicui_<id>.conf and <id>.<ext> from this
 readonly APP_SUBDIR='inode_usage'
 readonly ICON_FILE='inode_usage.svg'

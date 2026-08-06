@@ -4,7 +4,12 @@ This plugin, created by [ChemiCloud.com](https://chemicloud.com) for their clien
 account a directory-by-directory breakdown of its inode usage. It adds an **Inode Usage** icon to the
 Files group in cPanel, shows the account's total and its inode limit, lists the home directory's
 top-level directories sorted by inode count, and lets each one be expanded to drill down. It is a
-read-only reporting tool: it never deletes, moves, or modifies a customer's files.
+reporting tool: it never deletes, moves, or modifies a customer's files, and it never writes anywhere
+a customer chose. It is not literally read-only, and it would be dishonest to claim otherwise: asking
+cPanel for the account's quota figure goes through `Cpanel::Quota::displayquota()`, which refreshes
+cPanel's own TTL cache at `~/.cpanel/datastore/_Cpanel::Quota.pm__<user>`. That file is cPanel's, the
+cPanel sidebar refreshes it too, and it costs one inode in a directory cPanel already owns — but on a
+page whose whole purpose is accounts that are at their inode limit, it is worth stating plainly.
 
 ![Inode Usage interface in cPanel](docs/screenshot-2.2.0.png)
 
@@ -23,8 +28,9 @@ Two pieces, and no PHP:
 The page is a Template Toolkit template. cPanel renders it with the same chrome, header, footer and
 theme assets as its own pages, and it is served by cpsrvd directly. The page's JavaScript then calls
 the plugin's own UAPI module over cPanel's standard `/execute/` endpoint, exactly the way cPanel's
-own front-end code calls `Quota` or `Fileman`. The module runs as the cPanel user — not as root —
-so it can only ever see what that user could already see from their own shell.
+own front-end code calls `Quota` or `Fileman`. The module runs as the cPanel user — not as root — so
+it can only read what that user's own Unix privileges already allow, and it confines its scan to the
+account's own home directory.
 
 **There is no `.live.php` and no `.live.pl` handler, and that is the single most important design
 decision in this release.** To serve any `.live.*` page, cPanel first creates a unix socket inside
@@ -70,6 +76,21 @@ symlinks sitting directly in the home directory, plus anything the ownership fil
 test account the 15 top-level rows summed to 3,025 against a quota figure of 3,085. The Total label
 therefore shows both numbers rather than pretending the difference does not exist.
 
+## What's new in 2.3.1
+
+- **Security and performance fix — upgrade is recommended.** This release hardens the
+  directory-scanning endpoints. The specifics are withheld until installations have had a chance to
+  upgrade; there is no configuration-level workaround for earlier releases.
+- **The documentation no longer calls the plugin "read-only."** It does not touch customer files,
+  but asking cPanel for the quota figure goes through `Cpanel::Quota::displayquota()`, which refreshes
+  cPanel's own cache in `~/.cpanel/datastore` — worth stating on a page whose whole purpose is
+  accounts at their inode limit.
+- **The "Outside your home directory" row no longer appears when the scan hit a directory it could
+  not read.** An unreadable directory inside the home — the common `nobody`-owned LiteSpeed cache
+  case — makes the scan undercount, and that difference was being reported as though the missing
+  inodes lived outside the home. They do not. The row is now suppressed in that case and the
+  discrepancy is carried by the "counted" figure under the Total.
+
 ## What's new in 2.2.0
 
 - **The installed version shows next to the page title.** The page reads the `VERSION` marker the
@@ -109,9 +130,7 @@ servers, installed from the pre-release vendor tarball.
    common. The page simply failed. Unreadable directories are now skipped.
 2. **Path containment on the drill-down.** The old endpoint took an absolute directory path in a
    query parameter and listed it, with no check that the path was inside the requesting account's
-   home directory. It ran with that user's own privileges, so it granted no read access the user did
-   not already have from a shell — but on a shared server it was a convenient enumerator for paths
-   outside the home directory. The drill-down now takes a **home-relative** path; the base is derived
+   home directory. The drill-down now takes a **home-relative** path; the base is derived
    server-side from the account's own home directory and is never taken from the client. The joined
    path is resolved and must land on the home directory or inside it. Anything outside, anything
    nonexistent, and anything unreadable get the *same* empty response, so the endpoint cannot be used
@@ -160,7 +179,7 @@ servers, installed from the pre-release vendor tarball.
 ### Recommended: clone the tag, read it, run it
 
 ```bash
-git clone --branch v2.2.0 --depth 1 https://github.com/dragosboro/cPanel-Inodes-Usage
+git clone --branch v2.3.1 --depth 1 https://github.com/dragosboro/cPanel-Inodes-Usage
 sudo ./cPanel-Inodes-Usage/install.sh
 ```
 
@@ -176,7 +195,7 @@ sudo ./cPanel-Inodes-Usage/install.sh --dry-run
 ### Convenience: tag-pinned one-liner
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/dragosboro/cPanel-Inodes-Usage/v2.2.0/install.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/dragosboro/cPanel-Inodes-Usage/v2.3.1/install.sh)
 ```
 
 Understand the trade-off: **you are executing remote code as root, and GitHub's TLS certificate is
@@ -184,7 +203,7 @@ the only thing standing between you and whatever that URL returns.** You have no
 are running. Run it only if that is acceptable on the box in question.
 
 Use `curl -fsSL`, not `curl -s`: without `-f`, curl prints the server's HTML error body on a 404 and
-exits 0, so `bash` is handed a web page instead of a script. And the URL is pinned to the `v2.2.0`
+exits 0, so `bash` is handed a web page instead of a script. And the URL is pinned to the `v2.3.1`
 tag, not to `main`, because a `main`-pinned one-liner re-fetches whatever was pushed most recently.
 
 Run this way the installer has no local payload, so it downloads the release tarball from that tag's
@@ -233,7 +252,7 @@ ls -l /usr/local/cpanel/Cpanel/API/ChemiCloudInodeUsage.pm
 The installer runs its own post-install verification — owner and mode on every deployed path, a
 `perl -c` syntax check and a load check on the UAPI module, and confirmation that the menu entry
 points at the file that was actually deployed — and exits non-zero if anything fails. A clean exit
-plus a `VERSION` reading `2.2.0` means the plugin is fully in place. The page itself displays the
+plus a `VERSION` reading `2.3.1` means the plugin is fully in place. The page itself displays the
 same version next to its title, read from that marker. Then log in as any cPanel user
 and look for **Inode Usage** in the Files group.
 
