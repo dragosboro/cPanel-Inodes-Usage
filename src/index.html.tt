@@ -28,14 +28,14 @@
 <div class="alert alert-info">
     <span class="glyphicon glyphicon-info-sign"></span>
     <div class="alert-message">
-        This table is <strong>updated in real-time</strong> with every page reload. Please note that if you have <i>more than 500,000 inodes</i>, the counting process <strong>can take up to 1 minute</strong>.
+        This table is <strong>updated in real-time</strong> with every page reload. Please note that if you have <i>more than 500,000 inodes</i>, the counting process <strong>can take up to 2 minutes</strong>.
     </div>
 </div>
 <!-- Preloader Section -->
 <div id="preloader" role="status" aria-live="polite" style="text-align: center; padding: 20px;">
     <br><br><br>
     <img src="preloader.gif" alt="Loading..." style="width: 50px; height: 50px;" />
-    <p style="padding-top: 50px;">Please wait, it can take up to 1 minute to count all the inodes.</p>
+    <p style="padding-top: 50px;">Please wait, it can take up to 2 minutes to count all the inodes.</p>
 </div>
 
 <div id="inode_table_container" style="display: none;">
@@ -100,7 +100,9 @@
      * home directory. The rows below it only cover directories inside the home,
      * so the column legitimately sums to less than the Total. When the API also
      * reports counted_inodes we label both numbers instead of leaving the gap
-     * unexplained. Set to false to render the Total cell exactly as v1 did. */
+     * unexplained. Set to false to render the Total cell exactly as v1 did.
+     * Since 2.1.0 the gap is additionally shown as its own labelled row when it
+     * is positive and trustworthy; see outsideHomeCount(). */
     var SHOW_HOME_SUBTOTAL = true;
 
     var preloader     = document.getElementById("preloader");
@@ -280,22 +282,26 @@
          * relative path means the row's path could not be placed inside the
          * home — never re-list the home in its place. */
         if (typeof relPath !== "string" || relPath === "") {
-            return Promise.resolve([]);
+            return Promise.resolve({ rows: [], meta: null });
         }
         if (treeIndex) {
             /* relpath is the module's own key; the absolute lookup is only
              * insurance against a map keyed the other way. */
             var hit = treeIndex[relPath] || treeIndex[absPath];
-            return Promise.resolve(hit ? hit.slice() : []);
+            return Promise.resolve({ rows: hit ? hit.slice() : [], meta: null });
         }
         return apiGet(API_FN_SUBFOLDER, { path: relPath }).then(function (data) {
-            /* An expand can hit the time budget or the row cap just as the
-             * initial call can. Dropping that flag rendered a short child list
-             * as if it were the whole story. */
-            notePartial(data);
-            return normalizeList(
-                Array.isArray(data) ? data : (data && data.directories)
-            );
+            /* The truncation flag travels WITH the rows instead of being
+             * reported from here: a response for an expand the user has since
+             * collapsed is discarded whole by the caller, and its banner has
+             * to be discarded with it — the table never shows these rows, so
+             * it must not warn about them either. */
+            return {
+                rows: normalizeList(
+                    Array.isArray(data) ? data : (data && data.directories)
+                ),
+                meta: data
+            };
         });
     }
 
@@ -454,7 +460,7 @@
         expandSeq.set(row, seq);
         setExpanded(row, true);
 
-        getChildren(rowRelPath.get(row), row.dataset.path).then(function (children) {
+        getChildren(rowRelPath.get(row), row.dataset.path).then(function (result) {
             /* Stale, or detached because an ancestor was collapsed while this
              * was in flight -- row.parentNode is null in the second case and
              * insertBefore would throw a raw TypeError into the alert() below. */
@@ -462,15 +468,23 @@
                 return;
             }
 
+            /* Only a response whose rows are actually inserted may install the
+             * partial-results banner. An expand can hit the time budget or the
+             * row cap just as the initial call can — dropping the flag rendered
+             * a short child list as if it were the whole story — but reporting
+             * it for a discarded response asserted a complete table was
+             * partial, permanently, over rows the user never saw. */
+            notePartial(result.meta);
+
             /* Nothing came back: the directory became unreadable or vanished
              * since the walk, or containment rejected it. Either way this is a
              * failed expand, so put the chevron back instead of leaving it
              * pointing down over no rows (v1 left it stuck). */
-            if (!children.length) {
+            if (!result.rows.length) {
                 setExpanded(row, false);
                 return;
             }
-            insertChildren(row, children, depth);
+            insertChildren(row, result.rows, depth);
         }).catch(function (error) {
             if (expandSeq.get(row) !== seq || !row.parentNode) {
                 return;
@@ -530,6 +544,52 @@
             return;
         }
         dataContainer.insertBefore(buildPartialNotice(data), dataContainer.firstChild);
+    }
+
+    /* Inodes the quota charges this account for files OUTSIDE the home
+     * directory — a backup or staging workspace owned by this uid under
+     * another path, for example. The walk cannot see them, so without this row
+     * the table quietly sums to less than the Total with nothing on screen
+     * naming the difference. Rendered only when the number is trustworthy:
+     * the quota figure must be real (quota_available) and the walk complete —
+     * a truncated walk undercounts counted_inodes, which would inflate this
+     * row with ordinary in-home inodes the walk never reached. The quota
+     * figure is TTL-cached by cPanel and can trail the kernel briefly, so a
+     * small negative difference is possible and suppressed. */
+    function outsideHomeCount(data) {
+        if (!data || data.quota_available !== true || data.truncated === true) {
+            return null;
+        }
+        if (typeof data.total_inodes !== "number" || typeof data.counted_inodes !== "number") {
+            return null;
+        }
+        var outside = data.total_inodes - data.counted_inodes;
+        return outside > 0 ? outside : null;
+    }
+
+    function buildOutsideRow(outside) {
+        var row = document.createElement("tr");
+
+        var nameCell = document.createElement("td");
+        nameCell.style.paddingLeft = "20px";
+
+        var label = document.createElement("em");
+        label.textContent = "Outside your home directory";
+        nameCell.appendChild(label);
+
+        nameCell.appendChild(document.createElement("br"));
+        var note = document.createElement("small");
+        note.className = "text-muted";
+        note.textContent = "files owned by your account that sit outside your home directory " +
+            "(a backup or staging workspace, for example) — your quota counts them, so they are part of the Total";
+        nameCell.appendChild(note);
+
+        var countCell = document.createElement("td");
+        countCell.textContent = outside;
+
+        row.appendChild(nameCell);
+        row.appendChild(countCell);
+        return row;
     }
 
     function buildTotalRow(data) {
@@ -602,6 +662,10 @@
         normalizeList(data.directories).forEach(function (dir) {
             tbody.appendChild(buildRow(dir, 0, null));
         });
+        var outside = outsideHomeCount(data);
+        if (outside !== null) {
+            tbody.appendChild(buildOutsideRow(outside));
+        }
         tbody.appendChild(buildTotalRow(data));
         table.appendChild(tbody);
 
@@ -635,9 +699,12 @@
     /* A walk abandoned by a reload keeps running -- and keeps the per-account
      * lock -- until it finishes, so the reload can arrive while the previous
      * request is still counting. Waiting is strictly better than telling the
-     * user to reload into the same message. Bounded, because two piled-up
-     * requests must not hold a cpsrvd child indefinitely. */
-    var BUSY_RETRIES  = 2;
+     * user to reload into the same message. Each busy round costs ~8s (the
+     * module holds the lock attempt for up to 5s before answering busy, plus
+     * the 3s pause here), so 15 rounds outlasts a full 120-second walk. Still
+     * bounded, because piled-up requests must not hold a cpsrvd child
+     * indefinitely -- each round is its own short request. */
+    var BUSY_RETRIES  = 15;
     var BUSY_RETRY_MS = 3000;
 
     function fetchInodeData(attempt) {

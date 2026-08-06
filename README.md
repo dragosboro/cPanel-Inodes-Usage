@@ -39,14 +39,17 @@ that was over quota.
 ### Counting
 
 - **The account total and the inode limit** come from the quota system — `Cpanel::Quota::
-  displayquota`, the same call and the same `/var/cpanel/repquota.cache` behind cPanel's own
-  `Quota::get_quota_info`. It is O(1) and it is the number cPanel's sidebar shows, so the two can no
+  displayquota`, the same call behind cPanel's own `Quota::get_quota_info`, served from the
+  per-user quota cache in `~/.cpanel/datastore` or, on a cache miss, live quota syscalls. It is
+  O(1) and it is the number cPanel's sidebar shows, so the two can no
   longer disagree. A limit of 0 is reported as `Unlimited`. If the quota lookup is unavailable (quotas
   off on the filesystem, or the datastore cache cannot be written), the Total falls back to the walked
   home subtotal **and says so on the page** rather than silently showing a different number.
 - **The per-directory counts** come from one iterative walk of the home directory that accumulates
-  a recursive subtotal for every directory at every depth in a single pass. The whole tree is
-  computed once; expanding a folder in the UI does not trigger another scan.
+  a recursive subtotal for every directory at every depth in a single pass. When the resulting map
+  is small enough to ship with the response (25,000 rows), expanding a folder in the UI is a
+  client-side lookup and triggers no further scanning; above that, an expansion falls back to a
+  per-directory API call that re-walks that subtree under the same budget and lock.
 - Only `lstat` is used. Symlinks are never followed, for counting or for descent, and each directory
   entry counts as exactly one inode. Hard links are de-duplicated by `(device, inode)`. Device
   boundaries are not crossed.
@@ -66,6 +69,27 @@ slightly different things: the rows cover directories, the quota figure also cou
 symlinks sitting directly in the home directory, plus anything the ownership filter excluded. On the
 test account the 15 top-level rows summed to 3,025 against a quota figure of 3,085. The Total label
 therefore shows both numbers rather than pretending the difference does not exist.
+
+## What's new in 2.1.0
+
+- **Standalone installs work again.** The 2.0.0 installer passed a nonexistent `--no-absolute-names`
+  option to tar, so the `bash <(curl …)` path always failed at extraction — after a successful
+  download and checksum pass — with exit 8. Checkout installs (`git clone` + `./install.sh`) were
+  unaffected. If you tried the one-liner on 2.0.0 and it died complaining it could not extract the
+  release asset, this was why.
+- **The wall-clock budget is 120 seconds, up from 25.** Accounts above 500,000 inodes were hitting
+  the old budget and rendering partial results. The budget remains a compiled ceiling that API
+  clients can lower but never raise.
+- **Inodes outside the home directory get their own labelled row.** The quota Total counts
+  everything the account's uid owns anywhere on the filesystem — including, say, a backup or
+  staging workspace outside the home — while the table rows only ever cover the home. That
+  difference now appears as its own row above the Total instead of being left for the customer to
+  puzzle over. The row appears only when the quota figure is available and the walk completed, so
+  a truncated walk can never inflate it.
+- Reloading the page while an abandoned scan still holds the per-account lock now waits out the
+  full walk (up to ~2 minutes) instead of giving up after ~9 seconds.
+- A drill-down response that arrived after its folder was already collapsed no longer installs a
+  permanent "Partial results" banner over rows that were never shown.
 
 ## What v2.0.0 fixes
 
@@ -88,9 +112,9 @@ servers, installed from the pre-release vendor tarball.
    rows and once again for the account total. The total is now a quota lookup, and the rows come from
    a single pass. On a 274,011-inode account the single-pass walk measured 2.2–5.5 seconds of CPU
    depending on the strategy benchmarked, and computing subtotals for *every* depth rather than only
-   the top level cost about 1.25× the depth-1 walk. There is also a wall-clock budget (25 seconds by
-   default): if it is exceeded, the partial result is returned with a `truncated` flag rather than
-   the request hanging or dying.
+   the top level cost about 1.25× the depth-1 walk. There is also a wall-clock budget — 25 seconds
+   in 2.0.0, 120 seconds since 2.1.0: if it is exceeded, the partial result is returned with a
+   `truncated` flag rather than the request hanging or dying.
 4. **It works for over-quota accounts.** See [How it works](#how-it-works). No `.live.*` handler can
    serve this page at all when the account is at its limit; this one was measured working both under
    and over quota.
@@ -128,7 +152,7 @@ servers, installed from the pre-release vendor tarball.
 ### Recommended: clone the tag, read it, run it
 
 ```bash
-git clone --branch v2.0.0 --depth 1 https://github.com/dragosboro/cPanel-Inodes-Usage
+git clone --branch v2.1.0 --depth 1 https://github.com/dragosboro/cPanel-Inodes-Usage
 sudo ./cPanel-Inodes-Usage/install.sh
 ```
 
@@ -144,7 +168,7 @@ sudo ./cPanel-Inodes-Usage/install.sh --dry-run
 ### Convenience: tag-pinned one-liner
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/dragosboro/cPanel-Inodes-Usage/v2.0.0/install.sh)
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/dragosboro/cPanel-Inodes-Usage/v2.1.0/install.sh)
 ```
 
 Understand the trade-off: **you are executing remote code as root, and GitHub's TLS certificate is
@@ -152,7 +176,7 @@ the only thing standing between you and whatever that URL returns.** You have no
 are running. Run it only if that is acceptable on the box in question.
 
 Use `curl -fsSL`, not `curl -s`: without `-f`, curl prints the server's HTML error body on a 404 and
-exits 0, so `bash` is handed a web page instead of a script. And the URL is pinned to the `v2.0.0`
+exits 0, so `bash` is handed a web page instead of a script. And the URL is pinned to the `v2.1.0`
 tag, not to `main`, because a `main`-pinned one-liner re-fetches whatever was pushed most recently.
 
 Run this way the installer has no local payload, so it downloads the release tarball from that tag's
@@ -201,7 +225,7 @@ ls -l /usr/local/cpanel/Cpanel/API/ChemiCloudInodeUsage.pm
 The installer runs its own post-install verification — owner and mode on every deployed path, a
 `perl -c` syntax check and a load check on the UAPI module, and confirmation that the menu entry
 points at the file that was actually deployed — and exits non-zero if anything fails. A clean exit
-plus a `VERSION` reading `2.0.0` means the plugin is fully in place. Then log in as any cPanel user
+plus a `VERSION` reading `2.1.0` means the plugin is fully in place. Then log in as any cPanel user
 and look for **Inode Usage** in the Files group.
 
 cPanel rebuilds its UAPI catalogue asynchronously after a plugin is installed. A minute or two later
@@ -283,9 +307,12 @@ install time or at run time, and the plugin makes no outbound network requests o
 ## Known behaviour and limits
 
 - **Very large accounts return a partial result rather than hanging.** The walk has a wall-clock
-  budget, 25 seconds by default, and a hard ceiling on the number of entries examined. When either is
-  hit the response is flagged as truncated and the page says so. The total and the limit are
-  unaffected — they come from the quota system, not the walk.
+  budget — 120 seconds by default, raised from 25 in 2.1.0 because real accounts above 500,000
+  inodes were hitting the old budget — and a hard ceiling on the number of entries examined. When
+  either is hit the response is flagged as truncated and the page says so. The total and the limit
+  are unaffected — they come from the quota system, not the walk. Anything proxying cpsrvd must
+  allow a request to run that long; cPanel's stock service-subdomain proxying (Apache `Timeout
+  300`) does.
 - **The Total and the sum of the rows will not match exactly**, and the page shows both. See
   [Counting](#counting) for why.
 - **Only one walk per account runs at a time.** A second request while a walk is in progress waits

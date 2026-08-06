@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [2.1.0] - 2026-08-06
+
+### Added
+
+- **A labelled row for inodes outside the home directory.** The quota Total counts
+  everything the account's uid owns anywhere on the filesystem — a backup or
+  staging workspace outside the home, for example — while the table rows only
+  ever cover the home directory, so the column could legitimately sum to
+  thousands less than the Total with nothing on screen naming the difference.
+  That difference (`total_inodes - counted_inodes`, both already in the API
+  response) now renders as its own row above the Total. It appears only when the
+  quota figure is available and the walk completed: a truncated walk undercounts
+  `counted_inodes`, which would otherwise inflate this row with ordinary in-home
+  inodes the walk never reached, and the quota cache can briefly trail the
+  kernel, so a non-positive difference is suppressed rather than shown.
+
+### Changed
+
+- **The wall-clock budget is 120 seconds, up from 25.** Real accounts above
+  500,000 inodes were hitting the old budget and rendering partial results with
+  the "counting stopped at a safety limit" notice. The budget remains a compiled
+  ceiling: API clients may lower `time_budget`, never raise it. Operators
+  proxying cpsrvd should confirm the proxy allows a request to run that long —
+  cPanel's stock service-subdomain proxying (Apache `Timeout 300`) does.
+- Reloading the page while an abandoned walk still holds the per-account lock
+  now retries for up to ~2 minutes (15 rounds of roughly 8 seconds each) instead
+  of giving up after ~9 seconds, matching the longer budget. Each round is its
+  own short request, so waiting still cannot pin a cpsrvd child.
+- The page's guidance text now says counting can take up to 2 minutes.
+
+### Fixed
+
+- **Standalone installs work again.** `install.sh` 2.0.0 passed
+  `--no-absolute-names` to tar — an option GNU tar does not have — so the
+  documented `bash <(curl …)` path always died at extraction (exit 8, blaming
+  the archive) after a successful download and checksum verification. Checkout
+  installs were unaffected, which is why release testing missed it. The flag is
+  gone: stripping leading slashes is GNU tar's default behaviour, and `-P` is
+  the opt-in to keep them.
+- A drill-down response arriving after its folder was collapsed no longer
+  installs the page-level "Partial results" banner. The rows from such a
+  response are discarded by the staleness guard, but the banner was installed
+  before that guard ran — permanently asserting a complete table was partial,
+  about rows the user never saw. The truncation flag now travels with the rows
+  and is reported only when they are actually inserted.
+- The installer's failure message when the application directory cannot be
+  created no longer claims "Nothing was deployed" — by that point the UAPI
+  module has already been updated, and an admin responding to the failure needs
+  to know the system is in that mixed state.
+- Documentation corrections, each found by checking claims against the code:
+  quota figures come from the per-user `~/.cpanel/datastore` cache or live
+  quota syscalls, not `/var/cpanel/repquota.cache` (README and this changelog's
+  2.0.0 entry, corrected in place); expanding a folder is scan-free only while
+  the full-depth map fits the response (25,000 rows) and falls back to a
+  per-directory re-walk above that; the module POD now lists every case that
+  returns `result.status` 0 and states the real cross-device counting rule (an
+  owned directory on another device is counted as one entry, never descended);
+  SECURITY.md's installer scope now names the UAPI module path and the
+  `data.zip` removal; the BLAST RADIUS block now states the `data.zip` match is
+  by exact size, not byte-for-byte content.
+
 ## [2.0.0] - 2026-08-06
 
 **First public release.** There is no public 1.x. A 1.0.0 was prepared — a corrected
@@ -124,13 +185,15 @@ that has been running on production servers.
   load, once for the per-directory rows and once again for the account total, and
   on large accounts that could exceed the request timeout and fail rather than
   render slowly. The total and the limit now come from `Cpanel::Quota::displayquota`
-  — the same call and the same `/var/cpanel/repquota.cache` behind cPanel's own
-  `Quota::get_quota_info`, called directly so that "quotas are disabled here" stays
-  distinguishable from "zero inodes used" — and is O(1) — and is the same figure
-  cPanel's sidebar shows, so the two can no longer disagree. The rows come from a
-  single iterative walk that accumulates a recursive subtotal for every directory
-  at every depth in one pass, so expanding a folder in the UI never triggers a
-  second scan. Measured on a 274,011-inode account, the single-pass walk took
+  — the same call behind cPanel's own `Quota::get_quota_info` (served from the
+  per-user `~/.cpanel/datastore` quota cache or live quota syscalls), called
+  directly so that "quotas are disabled here" stays distinguishable from "zero
+  inodes used" — and is O(1) — and is the same figure cPanel's sidebar shows, so
+  the two can no longer disagree. The rows come from a single iterative walk
+  that accumulates a recursive subtotal for every directory at every depth in
+  one pass, so expanding a folder is served from that pass whenever the
+  full-depth map fits the response (25,000 rows; above that an expansion falls
+  back to a per-directory call). Measured on a 274,011-inode account, the single-pass walk took
   2.2–5.5 seconds of CPU depending on the strategy benchmarked, and computing
   subtotals for every depth rather than only the top level cost about 1.25× the
   depth-1 walk.
@@ -254,5 +317,6 @@ that has been running on production servers.
 - The dependency on a PHP interpreter being available to cPanel's internal web
   server. Nothing in the plugin is PHP any more.
 
-[Unreleased]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/dragosboro/cPanel-Inodes-Usage/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/dragosboro/cPanel-Inodes-Usage/releases/tag/v2.0.0

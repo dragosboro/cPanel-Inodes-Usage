@@ -9,7 +9,8 @@ privileged system tool.
 
 | Version | Supported          | Notes                                                        |
 | ------- | ------------------ | ------------------------------------------------------------ |
-| 2.0.0   | Yes                | Current release. Security fixes land here.                    |
+| 2.1.0   | Yes                | Current release. Security fixes land here.                    |
+| 2.0.0   | No                 | Upgrade to 2.1.0. Fixes are not backported. Note that 2.0.0's standalone (`bash <(curl …)`) install path is broken — it always fails at extraction — so any 2.0.0 install came from a checkout. |
 | < 2.0.0 | No                 | There is no public 1.x. Anything older is a pre-release copy of the PHP implementation, installed from the original vendor tarball, which fetched its payload from an external personal domain that no longer serves it. Those installs are broken as well as unsupported, and one of their endpoints does not confine its path parameter to the caller's home directory — upgrade to 2.0.0 (the installer removes those endpoints) rather than reporting issues against them. |
 
 There is no long-term support branch. Fixes are released as a new patch version
@@ -86,8 +87,10 @@ Specifically in scope:
 
 - Any path by which the installer touches something other than
   `/usr/local/cpanel/base/frontend/<theme>/inode_usage/`, the theme's
-  `dynamicui/` drop-in entry, the theme's `application_icons/` entry, and its
-  own `mktemp` scratch directory.
+  `dynamicui/` drop-in entry, the theme's `application_icons/` entry, the UAPI
+  module at `/usr/local/cpanel/Cpanel/API/ChemiCloudInodeUsage.pm`, the
+  size-matched `data.zip` removal in the theme root, and its own `mktemp`
+  scratch directory.
 - Symlink attacks, `TMPDIR` manipulation, or races against the scratch
   directory or the target directory.
 - Injection through arguments, environment, or the resolved theme name.
@@ -99,7 +102,7 @@ Specifically in scope:
   in a `0755 root:root` directory) — including the UAPI module, which is the one
   path installed outside the theme.
 - Anything that lets the installer write to, or delete, a path other than the
-  four it documents under BLAST RADIUS, or that defeats the manifest and
+  ones it documents under BLAST RADIUS, or that defeats the manifest and
   provenance-marker checks guarding `/usr/local/cpanel/Cpanel/API/`.
 - Problems in the pinned `bash <(curl …)` convenience path, including checksum
   verification.
@@ -139,8 +142,11 @@ or a checksum embedded in `install.sh` that does not match the published asset.
   partial result. A report is in
   scope only if it demonstrates impact on *other* accounts or on the server as a
   whole.
-- The documented HTTP 500 that an over-quota account can get instead of the
-  page. That happens in cPanel's `.live.*` socket setup before this code runs.
+- Over-quota failures of the pre-2.0 `.live.php` endpoints (an HTTP 500 raised
+  in cPanel's `.live.*` socket setup before any plugin code runs). Those
+  endpoints are removed by the 2.0.0+ installer. The current page is expected
+  to work over quota — a failure of *this* page on an over-quota account IS in
+  scope.
 - Findings that require root on the server, or physical/console access. If you
   are already root, the installer is not your obstacle.
 - Anything requiring the operator to have deliberately deviated from the

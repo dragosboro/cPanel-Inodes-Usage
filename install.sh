@@ -21,8 +21,9 @@
 #            install(1) unlinks-then-creates: no write through a symlink, no service restart, but a cpsrvd
 #            child that already require'd the module keeps the old code until that session process exits.
 # DELETE     T/inode_usage/<STALE_FILES>  superseded names, only after a successful deploy
-#            T/data.zip     only when byte-for-byte the 43472-byte artifact left by a 2025
-#                           partial run; any other data.zip is left alone
+#            T/data.zip     only when its size matches the 43472-byte artifact left by a 2025
+#                           partial run EXACTLY; anything else named data.zip is left alone. Size is
+#                           the only fingerprint available -- no copy of that artifact survives to hash.
 #            T/inode_usage/ recursively and Cpanel/API/ChemiCloudInodeUsage.pm (same two conditions as
 #            the install side), --uninstall only; plus the temp dir above
 # NEVER      T/dynamicui.conf (the single file) -- cpanelsync-managed, cPanel rewrites it on
@@ -43,7 +44,7 @@
 
 set -Eeuo pipefail   # -E propagates the ERR trap into functions, which makes exit 12 reachable.
 
-readonly SCRIPT_VERSION='2.0.0'
+readonly SCRIPT_VERSION='2.1.0'
 readonly REPO_SLUG='dragosboro/cPanel-Inodes-Usage'
 readonly RELEASE_TAG="v${SCRIPT_VERSION}"
 # An UPLOADED asset, not GitHub's auto-generated /archive/ tarball: that one is recompressed server-
@@ -54,7 +55,7 @@ readonly RELEASE_ASSET="cPanel-Inodes-Usage-${SCRIPT_VERSION}.tar.gz"
 readonly RELEASE_URL="https://github.com/${REPO_SLUG}/releases/download/${RELEASE_TAG}/${RELEASE_ASSET}"
 # RELEASE ENGINEERING: substituted at tag time; gate tagging on it. Until then this is not 64 hex
 # digits, so standalone mode refuses to run rather than fetch unverified code as root.
-readonly RELEASE_SHA256='766ac4ba0bf998535b242f4d320a28a53dbae13719e96fca0098affaa0e229e3'
+readonly RELEASE_SHA256='8e7c50ad8c261ce7c64e71eaa0ff247f91c7d346719695efecff6664b6bc3aeb'
 readonly PLUGIN_ID='inode_usage'    # cPanel names BOTH dynamicui_<id>.conf and <id>.<ext> from this
 readonly APP_SUBDIR='inode_usage'
 readonly ICON_FILE='inode_usage.svg'
@@ -269,7 +270,10 @@ download_payload() {
     mkdir -p "${WORK}/x"
     # As root, without these flags tar restores the archive's ownership, setuid bits and modes -- and
     # the icon's mode reaches the theme docroot verbatim (install_plugin copies with KeepMode=1).
-    tar -xzf "${WORK}/asset.tar.gz" -C "${WORK}/x" --no-same-owner --no-same-permissions --no-absolute-names \
+    # Leading '/' needs no flag: stripping it is GNU tar's DEFAULT, -P is the opt-in to keep it.
+    # 2.0.0 passed a nonexistent --no-absolute-names here, so GNU tar exited 64 and every standalone
+    # install died at this step -- after a successful download and checksum pass.
+    tar -xzf "${WORK}/asset.tar.gz" -C "${WORK}/x" --no-same-owner --no-same-permissions \
         || die 8 "Could not extract ${RELEASE_ASSET}."
     shopt -s nullglob; tops=("${WORK}/x"/*/); shopt -u nullglob   # our asset: one top-level dir
     (( ${#tops[@]} == 1 )) || die 6 "${RELEASE_ASSET} does not have the expected single top-level directory."
@@ -350,7 +354,7 @@ deploy() {
     run install -o root -g root -m 0644 "$MODULE_SRC" "$MODULE_DEST" \
         || die 7 "Failed installing ${MODULE_DEST}; it may now be truncated. Fix the cause (disk, I/O) and re-run."
     (( DRY_RUN )) || say "  ${MODULE_DEST}"
-    run install -d -o root -g root -m 0755 "$APP_DIR" || die 7 "Could not create ${APP_DIR} (0755 root:root). Nothing was deployed."
+    run install -d -o root -g root -m 0755 "$APP_DIR" || die 7 "Could not create ${APP_DIR} (0755 root:root). ${MODULE_DEST} was already updated; the theme files were not. Fix the cause and re-run."
     for f in "${PAYLOAD_FILES[@]}"; do
         run install -o root -g root -m 0644 "${PAYLOAD_DIR}/src/${f}" "${APP_DIR}/${f}" \
             || die 7 "Failed installing ${APP_DIR}/${f}; it may now be truncated. Fix the cause (disk, quota, I/O) and re-run."

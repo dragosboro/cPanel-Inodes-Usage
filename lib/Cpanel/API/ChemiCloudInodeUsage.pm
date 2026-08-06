@@ -14,7 +14,7 @@ package Cpanel::API::ChemiCloudInodeUsage;
 use strict;
 use warnings;
 
-our $VERSION = '2.0.0';
+our $VERSION = '2.1.0';
 
 use Cwd         ();
 use Fcntl       ();
@@ -93,8 +93,11 @@ dangling symlink at all).
 actually charges. Only entries with C<nlink E<gt> 1> are tracked, so the memory
 cost is proportional to the number of hardlinked files, not to the tree.
 
-=item * Device boundaries are not crossed. A subdirectory on another device is
-neither descended nor listed; quota is per-filesystem, so excluding it is correct.
+=item * Device boundaries are not crossed. A directory on another device is
+never descended and never listed. When the account owns it, its own entry is
+still counted as one — like any other owned entry, and deduplicated through the
+hardlink table when its C<nlink> exceeds 1 — but the subtree behind it, which
+the home filesystem's quota does not charge, is excluded entirely.
 
 =item * Unreadable directories are skipped silently rather than descended. This
 is the fix for the old code dying outright on nobody-owned LiteSpeed cache
@@ -125,7 +128,7 @@ build 200,000 rows from it.
 
 =head1 GUARDRAILS
 
-Wall-clock budget (default 25s, measured on C<CLOCK_MONOTONIC> so an NTP step
+Wall-clock budget (default 120s, measured on C<CLOCK_MONOTONIC> so an NTP step
 cannot move the deadline), hard entry ceiling (default 2,000,000), max depth 512,
 per-level row cap, one walk at a time per account via C<flock>, one walk per
 process, and self-throttling. C<cpsrvd> enters neither LVE nor CageFS, so nothing
@@ -156,7 +159,10 @@ raise them above the compiled defaults.
 # Tunables. Each is also the hard ceiling for the matching request argument.
 #----------------------------------------------------------------------
 
-our $DEFAULT_TIME_BUDGET   = 25;           # seconds of wall clock for one walk
+# 120, raised from 25 in 2.1.0: real accounts above ~500k inodes hit the old
+# budget and rendered partial results. Anything proxying cpsrvd must allow the
+# request to run this long (stock service-subdomain proxying, Timeout 300, does).
+our $DEFAULT_TIME_BUDGET   = 120;          # seconds of wall clock for one walk
 our $DEFAULT_MAX_ENTRIES   = 2_000_000;    # hard ceiling on directory entries examined
 our $DEFAULT_MAX_TREE_DIRS = 25_000;       # emit the full-depth map below this many rows
 our $MAX_ROWS_PER_LEVEL    = 5_000;        # most subdirectory rows emitted for one directory
@@ -252,7 +258,7 @@ Optional arguments, all clamped to C<[min, compiled default]>:
 
 =over 4
 
-=item * C<time_budget> - seconds, 1 .. 25 (default 25)
+=item * C<time_budget> - seconds, 1 .. 120 (default 120)
 
 =item * C<max_entries> - 1000 .. 2000000 (default 2000000)
 
@@ -1050,9 +1056,12 @@ sub _blank_listing {
 =head1 RESPONSE
 
 Both functions return the usual UAPI envelope; everything documented above lives
-under C<result.data>. C<result.status> is 1 on success and 0 only for "cannot
-determine the home directory" and for the concurrency refusal (which also sets
-C<data.busy> to C<true>).
+under C<result.data>. C<get_usage> returns C<result.status> 0 in four cases:
+the account's home directory cannot be determined; the concurrency refusal
+(which also sets C<data.busy> to C<true>); the home directory cannot be resolved
+or opened; and a walk that dies. C<list_subfolders> returns 0 B<only> for the
+concurrency refusal — every other rejection deliberately returns the successful
+blank listing, so a status probe is not an existence oracle.
 
 Fields the page must not ignore:
 
