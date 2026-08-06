@@ -6,7 +6,7 @@ Files group in cPanel, shows the account's total and its inode limit, lists the 
 top-level directories sorted by inode count, and lets each one be expanded to drill down. It is a
 read-only reporting tool: it never deletes, moves, or modifies a customer's files.
 
-![Inode Usage interface in cPanel](docs/screenshot.png)
+![Inode Usage interface in cPanel](docs/screenshot-2.2.0.png)
 
 **Version 2.0.0 is the first public release.** The version number starts at 2.0.0 deliberately — see
 [Why the history starts at 2.0.0](#why-the-history-starts-at-200).
